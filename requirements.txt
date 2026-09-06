@@ -1,0 +1,2 @@
+numpy>=1.22
+pillow>=9.0          # optional: faster canvas blit and flip animation
