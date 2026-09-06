@@ -85,6 +85,20 @@ if the timer runs out while the window is minimised, the window comes back by
 itself. **Reset** stops the alarm at once; **Restart**, a flip or picking a new
 duration also stop it and start over.
 
+### The notification area
+
+On Windows the app lives in the notification area, so a timer is never lost to a
+stray click. Closing the window with **X** only hides it: the countdown carries
+on at full accuracy, and the hourglass icon stays in the tray. Click that icon to
+bring the window back, or right-click it for **Show** and **Exit** — **Exit** is
+what actually ends the app. A timer that runs out while the window is hidden
+raises it again by itself, alarm and all.
+
+There is no extra package behind this: a hidden window collects what the shell
+sends and the timer's own frame loop reads it, so nothing runs on a second
+thread. Elsewhere than Windows there is no notification area to hide in, and the
+X button closes the app as usual.
+
 ## Requirements
 
 * Python 3.9 or newer with Tkinter (the standard python.org installer includes it)
@@ -97,9 +111,10 @@ See [Setup](#setup) for the install commands.
 
 It is written for Windows but does run on macOS and Linux: the Windows-only
 calls are all guarded, so the DPI hint becomes a no-op and the completion chime
-falls back to the terminal bell. You lose `run.bat`, Segoe UI and Consolas give
-way to Tk's default fonts, and on Linux the scroll-to-change-duration shortcut is
-inert because X11 does not send Tk's `<MouseWheel>` event.
+falls back to the terminal bell. There is no tray icon, so the X button quits as
+usual. You lose `run.bat`, Segoe UI and Consolas give way to Tk's default fonts,
+and on Linux the scroll-to-change-duration shortcut is inert because X11 does not
+send Tk's `<MouseWheel>` event.
 
 ## How the hourglass is drawn
 
@@ -134,5 +149,5 @@ hourglass_timer.py   timer logic and the Tk interface
 sand_render.py       the renderer (standalone; no Tk dependency)
 run.bat              launcher
 make_shortcut.ps1    puts a shortcut to it on the desktop (Windows)
-hourglass.ico        the shortcut's icon, rendered by sand_render.py
+hourglass.ico        the shortcut and tray icon, rendered by sand_render.py
 ```

@@ -46,6 +46,8 @@ SAND_HI = "#f6cf8a"
 PRESETS = [("1", 60), ("3", 180), ("5", 300), ("10", 600),
            ("15", 900), ("25", 1500), ("45", 2700), ("60", 3600)]
 
+ICON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hourglass.ico")
+
 FLIP_SECONDS = 0.85
 FRAME_MS = 33
 
@@ -118,12 +120,33 @@ def alarm_wav_bytes(rate=22050):
     return buf.getvalue()
 
 
+def window_hwnd(root):
+    """The window Windows itself knows about, or None off Windows.
+
+    ``winfo_id`` hands back Tk's inner frame; the taskbar button and the
+    foreground rules belong to the top of that chain (GA_ROOT).
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        user32.GetAncestor.restype = wintypes.HWND
+        user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+        inner = root.winfo_id()
+        return user32.GetAncestor(inner, 2) or inner
+    except Exception:
+        return None
+
+
 def flash_taskbar(root, on):
     """Blink the window's taskbar button until it is brought to the front.
 
     This is what keeps a finished timer noticeable while its window is
     minimised. It is a no-op anywhere but Windows.
     """
+    hwnd = window_hwnd(root)
+    if not hwnd:
+        return
     try:
         import ctypes
         from ctypes import wintypes
@@ -137,16 +160,249 @@ def flash_taskbar(root, on):
                     ("dwTimeout", wintypes.DWORD)]
 
     try:
-        user32.GetAncestor.restype = wintypes.HWND
-        user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
-        # Tk's toplevel is a child of the real window Windows shows in the
-        # taskbar, so ask for the root of the chain (GA_ROOT).
-        hwnd = user32.GetAncestor(root.winfo_id(), 2) or root.winfo_id()
         # FLASHW_ALL | FLASHW_TIMERNOFG: keep blinking until it is foreground.
         info = FLASHWINFO(ctypes.sizeof(FLASHWINFO), hwnd, 0x0F if on else 0, 0, 0)
         user32.FlashWindowEx(ctypes.byref(info))
     except Exception:
         pass
+
+
+def show_window(root):
+    """Bring a hidden or minimised window back, and put it in front."""
+    try:
+        root.deiconify()
+        root.lift()
+    except tk.TclError:
+        return
+    hwnd = window_hwnd(root)
+    if not hwnd:
+        return
+    try:
+        import ctypes
+        ctypes.windll.user32.SetForegroundWindow(hwnd)
+    except Exception:
+        pass
+
+
+WM_TRAY = 0x0400 + 20                   # WM_APP + 20: our own tray callback
+TRAY_SHOW, TRAY_EXIT = 1, 2             # the two menu commands
+TRAY_MENU = 3                           # internal: put the menu up
+_tray_serial = 0
+
+
+class TrayIcon:
+    """An icon in the Windows notification area, run from Tk's own loop.
+
+    There is no thread and no extra package behind it: a hidden window takes
+    the shell's callbacks and the frame loop drains that one window's queue,
+    so Show and Exit arrive on the main thread like any other click. The
+    constructor raises if the icon cannot be created; use :func:`make_tray`.
+    """
+
+
+    def __init__(self, title, icon_path, on_show, on_exit):
+        global _tray_serial
+        import ctypes
+        from ctypes import wintypes
+
+        self.ctypes = ctypes
+        self.on_show = on_show
+        self.on_exit = on_exit
+        self.hwnd = self.hmenu = None
+        self._added = False
+        # both are read by the callback while the window is still being created
+        self._taskbar_created = 0
+        self._pending = []
+        user32 = self.user32 = ctypes.WinDLL("user32", use_last_error=True)
+        self.shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+
+        LRESULT = ctypes.c_ssize_t
+        WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wintypes.HWND, wintypes.UINT,
+                                     wintypes.WPARAM, wintypes.LPARAM)
+
+        class WNDCLASS(ctypes.Structure):
+            _fields_ = [("style", wintypes.UINT), ("lpfnWndProc", WNDPROC),
+                        ("cbClsExtra", ctypes.c_int), ("cbWndExtra", ctypes.c_int),
+                        ("hInstance", wintypes.HINSTANCE), ("hIcon", wintypes.HICON),
+                        ("hCursor", wintypes.HANDLE), ("hbrBackground", wintypes.HANDLE),
+                        ("lpszMenuName", wintypes.LPCWSTR),
+                        ("lpszClassName", wintypes.LPCWSTR)]
+
+        class NOTIFYICONDATA(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.DWORD), ("hWnd", wintypes.HWND),
+                        ("uID", wintypes.UINT), ("uFlags", wintypes.UINT),
+                        ("uCallbackMessage", wintypes.UINT), ("hIcon", wintypes.HICON),
+                        ("szTip", wintypes.WCHAR * 128), ("dwState", wintypes.DWORD),
+                        ("dwStateMask", wintypes.DWORD), ("szInfo", wintypes.WCHAR * 256),
+                        ("uVersion", wintypes.UINT), ("szInfoTitle", wintypes.WCHAR * 64),
+                        ("dwInfoFlags", wintypes.DWORD), ("guidItem", ctypes.c_byte * 16),
+                        ("hBalloonIcon", wintypes.HICON)]
+
+        class MSG(ctypes.Structure):
+            _fields_ = [("hwnd", wintypes.HWND), ("message", wintypes.UINT),
+                        ("wParam", wintypes.WPARAM), ("lParam", wintypes.LPARAM),
+                        ("time", wintypes.DWORD), ("pt", wintypes.POINT)]
+
+        self._MSG = MSG
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        # Handles are pointer-sized: without a restype ctypes hands back a
+        # 32-bit int and the top half of the module handle is lost.
+        kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+        kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+        user32.CreateWindowExW.restype = wintypes.HWND
+        user32.CreateWindowExW.argtypes = [
+            wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID]
+        user32.DefWindowProcW.restype = LRESULT
+        # Without these the window parameters are squeezed into a plain int,
+        # which overflows: the callback would then raise on the very first
+        # message and creating the window would fail.
+        user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT,
+                                          wintypes.WPARAM, wintypes.LPARAM]
+        user32.DestroyWindow.argtypes = [wintypes.HWND]
+        user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+        user32.TrackPopupMenu.argtypes = [
+            wintypes.HMENU, wintypes.UINT, ctypes.c_int, ctypes.c_int,
+            ctypes.c_int, wintypes.HWND, wintypes.LPVOID]
+        user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT,
+                                        wintypes.WPARAM, wintypes.LPARAM]
+        user32.PeekMessageW.argtypes = [ctypes.POINTER(MSG), wintypes.HWND,
+                                        wintypes.UINT, wintypes.UINT, wintypes.UINT]
+        user32.LoadImageW.restype = wintypes.HANDLE
+        user32.LoadIconW.restype = wintypes.HANDLE
+        user32.CreatePopupMenu.restype = wintypes.HMENU
+
+        # the callback has to outlive the window, so it is kept on the instance
+        self._proc = WNDPROC(self._wndproc)
+        _tray_serial += 1
+        self._class = "HourglassTimerTray_%d_%d" % (os.getpid(), _tray_serial)
+        hinst = kernel32.GetModuleHandleW(None)
+        wc = WNDCLASS()
+        wc.lpfnWndProc = self._proc
+        wc.hInstance = hinst
+        wc.lpszClassName = self._class
+        self._wc = wc                       # keeps the class name buffer alive
+        if not user32.RegisterClassW(ctypes.byref(wc)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        self.hwnd = user32.CreateWindowExW(0, self._class, title, 0,
+                                           0, 0, 0, 0, None, None, hinst, None)
+        if not self.hwnd:
+            raise ctypes.WinError(ctypes.get_last_error())
+
+        self.hicon = 0
+        if icon_path and os.path.exists(icon_path):
+            # IMAGE_ICON, LR_LOADFROMFILE | LR_DEFAULTSIZE: the shell's own size
+            self.hicon = user32.LoadImageW(None, icon_path, 1, 0, 0, 0x0010 | 0x0040)
+        if not self.hicon:                  # IDI_APPLICATION
+            self.hicon = user32.LoadIconW(
+                None, ctypes.cast(ctypes.c_void_p(32512), ctypes.c_wchar_p))
+
+        self.hmenu = user32.CreatePopupMenu()
+        user32.AppendMenuW(self.hmenu, 0, TRAY_SHOW, "Show")
+        user32.AppendMenuW(self.hmenu, 0, TRAY_EXIT, "Exit")
+
+        self._nid = NOTIFYICONDATA()
+        self._nid.cbSize = ctypes.sizeof(NOTIFYICONDATA)
+        self._nid.hWnd = self.hwnd
+        self._nid.uID = 1
+        self._nid.uFlags = 0x01 | 0x02 | 0x04       # MESSAGE | ICON | TIP
+        self._nid.uCallbackMessage = WM_TRAY
+        self._nid.hIcon = self.hicon
+        self._nid.szTip = title[:127]
+        # explorer sends this when it restarts, and every icon has to be re-added
+        self._taskbar_created = user32.RegisterWindowMessageW("TaskbarCreated")  # noqa: E501
+        if not self._add():
+            self.close()
+            raise OSError("Shell_NotifyIcon(NIM_ADD) failed")
+
+    def _add(self):
+        self._added = bool(self.shell32.Shell_NotifyIconW(      # NIM_ADD
+            0, self.ctypes.byref(self._nid)))
+        return self._added
+
+    def pump(self):
+        """Take what the shell sent us, then act on it.
+
+        Only this window's messages are peeked, so Tk's own queue is left
+        alone. Acting happens out here rather than in the window procedure:
+        Windows may run that procedure from inside Tcl's message dispatch,
+        where calling back into Tk would crash the interpreter.
+        """
+        if not self.hwnd:
+            return
+        msg = self._MSG()
+        ref = self.ctypes.byref(msg)
+        while self.user32.PeekMessageW(ref, self.hwnd, 0, 0, 1):    # PM_REMOVE
+            self.user32.TranslateMessage(ref)
+            self.user32.DispatchMessageW(ref)
+        while self._pending and self.hwnd:
+            self._invoke(self._pending.pop(0))
+
+    def _wndproc(self, hwnd, msg, wparam, lparam):
+        """Note down what happened; :meth:`pump` is what acts on it."""
+        try:
+            if msg == WM_TRAY:
+                event = lparam & 0xFFFF
+                if event in (0x0202, 0x0203):       # WM_LBUTTONUP, double click
+                    self._pending.append(TRAY_SHOW)
+                elif event == 0x0205:               # WM_RBUTTONUP
+                    self._pending.append(TRAY_MENU)
+                return 0
+            if msg == 0x0111:                       # WM_COMMAND, from the menu
+                self._pending.append(wparam & 0xFFFF)
+                return 0
+            if msg and msg == self._taskbar_created:
+                self._added = False
+                self._add()
+                return 0
+        except Exception:
+            pass                        # never stall the window over a slip
+        return self.user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+    def _popup(self):
+        from ctypes import wintypes
+        ctypes, user32 = self.ctypes, self.user32
+        pt = wintypes.POINT()
+        user32.GetCursorPos(ctypes.byref(pt))
+        # the owner has to be in front or the menu will not close again
+        user32.SetForegroundWindow(self.hwnd)
+        # TPM_RIGHTBUTTON | TPM_NONOTIFY | TPM_RETURNCMD: hand the choice back
+        cmd = user32.TrackPopupMenu(self.hmenu, 0x0002 | 0x0080 | 0x0100,
+                                    pt.x, pt.y, 0, self.hwnd, None)
+        user32.PostMessageW(self.hwnd, 0, 0, 0)     # lets the menu tidy up
+        self._invoke(cmd)
+
+    def _invoke(self, cmd):
+        if cmd == TRAY_MENU:
+            self._popup()
+        elif cmd == TRAY_SHOW:
+            self.on_show()
+        elif cmd == TRAY_EXIT:
+            self.on_exit()
+
+    def close(self):
+        """Take the icon out of the notification area for good."""
+        try:
+            if self._added:
+                self.shell32.Shell_NotifyIconW(2, self.ctypes.byref(self._nid))
+                self._added = False
+            if self.hmenu:
+                self.user32.DestroyMenu(self.hmenu)
+                self.hmenu = None
+            if self.hwnd:
+                self.user32.DestroyWindow(self.hwnd)
+                self.hwnd = None
+        except Exception:
+            pass
+
+
+def make_tray(title, icon_path, on_show, on_exit):
+    """A tray icon, or None where there is no notification area to put one in."""
+    try:
+        return TrayIcon(title, icon_path, on_show, on_exit)
+    except Exception:
+        return None
 
 
 def png_bytes(arr):
@@ -243,6 +499,10 @@ class HourglassTimer:
         self._set_icon()
         self._bind_keys()
         self._sync_labels()
+        # Closing the window parks the app in the notification area instead of
+        # ending it, so a running timer survives a stray click on the X.
+        self.tray = make_tray("Hourglass Timer", ICON_PATH, self._show, self.quit)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after(16, self._loop)
 
     # -- window -----------------------------------------------------------
@@ -430,6 +690,27 @@ class HourglassTimer:
         step = 60.0 if self.total >= 120 else 30.0
         self.set_duration(min(24 * 3600.0, max(30.0, self.total + (step if event.delta > 0 else -step))))
 
+    def _on_close(self):
+        """The X button hides to the tray; the timer keeps counting."""
+        if self.tray is None:               # nowhere to hide: really quit
+            self.quit()
+        else:
+            self.root.withdraw()
+
+    def _show(self):
+        show_window(self.root)
+
+    def quit(self):
+        """End the application, icon and all."""
+        self._stop_alarm()
+        if self.tray is not None:
+            self.tray.close()
+            self.tray = None
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
+
     def _toggle_topmost(self):
         self.on_top = not self.on_top
         self.root.attributes("-topmost", self.on_top)
@@ -547,14 +828,19 @@ class HourglassTimer:
     # -- frame loop -------------------------------------------------------
     def _loop(self):
         try:
+            if self.tray is not None:
+                self.tray.pump()
             self._frame()
         except tk.TclError:                 # window closed mid-frame
             pass
 
     def _frame(self):
         started = now = time.perf_counter()
-        dt = min(0.1, now - self._last)
+        elapsed = now - self._last
         self._last = now
+        # The clock counts real time, whatever the window is doing; only the
+        # sand is capped, so a slow frame cannot spit out a burst of grains.
+        dt = min(0.1, elapsed)
 
         angle = 0.0
         if self.flip_start is not None:
@@ -564,7 +850,7 @@ class HourglassTimer:
             else:
                 angle = 180.0 * (u * u * (3.0 - 2.0 * u))
         elif self.running:
-            self.remaining -= dt
+            self.remaining -= elapsed
             if self.remaining <= 0.0:
                 self.remaining = 0.0
                 self.running = False
@@ -590,7 +876,9 @@ class HourglassTimer:
         # rather than burn a core for the length of a one-hour timer.
         moving = (self.running or self.flip_start is not None
                   or bool(self.renderer.particles) or self._redraw)
-        if not moving or self.root.state() == "iconic":
+        # there is nothing to draw for a window in the tray either
+        hidden = self.root.state() in ("iconic", "withdrawn")
+        if not moving or hidden:
             self.root.after(150, self._loop)
             return
 
