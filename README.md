@@ -51,6 +51,20 @@ Double-click **`run.bat`**, or:
 `run.bat` uses `.venv` if it is present and otherwise falls back to the
 `pythonw` on your PATH.
 
+### A desktop shortcut
+
+On Windows, one command puts a double-click launcher on your desktop:
+
+```
+powershell -ExecutionPolicy Bypass -File make_shortcut.ps1
+```
+
+That creates **Hourglass Timer** on the desktop, aimed at
+`.venv\Scripts\pythonw.exe` rather than at `run.bat` so no console window flashes
+on launch, and wearing `hourglass.ico` — an icon rendered by `sand_render.py`
+itself. The shortcut stores absolute paths, so run the script again if you move
+the project folder.
+
 ## Using it
 
 | Control | What it does |
@@ -115,4 +129,6 @@ paused, so an idle timer costs no CPU.
 hourglass_timer.py   timer logic and the Tk interface
 sand_render.py       the renderer (standalone; no Tk dependency)
 run.bat              launcher
+make_shortcut.ps1    puts a shortcut to it on the desktop (Windows)
+hourglass.ico        the shortcut's icon, rendered by sand_render.py
 ```
