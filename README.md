@@ -78,8 +78,12 @@ the project folder.
 | Scroll over the hourglass | Adds or removes a minute while it is stopped |
 | **always on top** | Keeps the window above other apps |
 
-When the time runs out the glass empties, the clock flashes and a short chime
-plays. **Restart** (or a flip) starts it again.
+When the time runs out the glass empties and the alarm starts: the chime
+repeats, the clock and the status line blink, and the taskbar button flashes. It
+is meant to be hard to miss, so minimising the window does not silence it — and
+if the timer runs out while the window is minimised, the window comes back by
+itself. **Reset** stops the alarm at once; **Restart**, a flip or picking a new
+duration also stop it and start over.
 
 ## Requirements
 

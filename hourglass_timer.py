@@ -10,11 +10,14 @@ Run with:  pythonw hourglass_timer.py     (or double-click run.bat)
 from __future__ import annotations
 
 import base64
+import io
+import os
 import struct
 import sys
-import threading
+import tempfile
 import time
 import tkinter as tk
+import wave
 import zlib
 from tkinter import font as tkfont
 
@@ -87,6 +90,61 @@ def enable_dpi_awareness():
         pass
     try:                                    # older Windows
         ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
+
+ALARM_NOTES = (988, 1319, 988, 1319, 880)
+
+
+def alarm_wav_bytes(rate=22050):
+    """The chime as a WAV: five notes and then a breath, ready to be looped."""
+    parts = []
+    for freq in ALARM_NOTES:
+        n = int(rate * 0.20)
+        t = np.arange(n) / rate
+        # fade each note in and out so looping never clicks
+        env = np.minimum(1.0, np.minimum(t * 120.0, (n / rate - t) * 40.0))
+        parts.append(np.sin(2.0 * np.pi * freq * t) * env * 0.5)
+        parts.append(np.zeros(int(rate * 0.06)))
+    parts.append(np.zeros(int(rate * 1.2)))        # the pause between rings
+    pcm = (np.concatenate(parts) * 32767).astype("<i2")
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(pcm.tobytes())
+    return buf.getvalue()
+
+
+def flash_taskbar(root, on):
+    """Blink the window's taskbar button until it is brought to the front.
+
+    This is what keeps a finished timer noticeable while its window is
+    minimised. It is a no-op anywhere but Windows.
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+    except Exception:
+        return
+
+    class FLASHWINFO(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.UINT), ("hwnd", wintypes.HWND),
+                    ("dwFlags", wintypes.DWORD), ("uCount", wintypes.UINT),
+                    ("dwTimeout", wintypes.DWORD)]
+
+    try:
+        user32.GetAncestor.restype = wintypes.HWND
+        user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+        # Tk's toplevel is a child of the real window Windows shows in the
+        # taskbar, so ask for the root of the chain (GA_ROOT).
+        hwnd = user32.GetAncestor(root.winfo_id(), 2) or root.winfo_id()
+        # FLASHW_ALL | FLASHW_TIMERNOFG: keep blinking until it is foreground.
+        info = FLASHWINFO(ctypes.sizeof(FLASHWINFO), hwnd, 0x0F if on else 0, 0, 0)
+        user32.FlashWindowEx(ctypes.byref(info))
     except Exception:
         pass
 
@@ -173,7 +231,10 @@ class HourglassTimer:
         self.finished = False
         self.flip_start = None
         self.flip_from = None
-        self.alarm_until = 0.0
+        self.alarming = False
+        self._wav_path = None
+        self._bell_after = None
+        self._flash_at = 0.0
         self._shown = None
         self._redraw = True
         self._last = time.perf_counter()
@@ -315,7 +376,7 @@ class HourglassTimer:
         self.remaining = float(seconds)
         self.running = False
         self.finished = False
-        self.alarm_until = 0.0
+        self._stop_alarm()
         self._sync_labels()
 
     def toggle(self):
@@ -323,14 +384,14 @@ class HourglassTimer:
             self.reset()
             return
         self.running = not self.running
-        self.alarm_until = 0.0
+        self._stop_alarm()
         self._sync_labels()
 
     def reset(self):
         self.running = False
         self.finished = False
         self.remaining = self.total
-        self.alarm_until = 0.0
+        self._stop_alarm()
         self._sync_labels()
 
     def flip(self):
@@ -338,7 +399,7 @@ class HourglassTimer:
             return
         self.flip_start = time.perf_counter()
         self.flip_from = self.remaining
-        self.alarm_until = 0.0
+        self._stop_alarm()
 
     def _finish_flip(self):
         self.remaining = max(0.0, self.total - self.flip_from)
@@ -387,7 +448,7 @@ class HourglassTimer:
     def _paint_labels(self):
         self._show_time()
         if self.finished:
-            text, colour = "time's up", SAND
+            text, colour = "time's up - press Reset", SAND
         elif self.running:
             text, colour = "running", MUTED
         elif self.remaining < self.total:
@@ -400,19 +461,88 @@ class HourglassTimer:
         for secs, chip in self.chips.items():
             chip.set_primary(abs(secs - self.total) < 0.5)
 
-    def _ring(self):
-        def play():
+    def _start_alarm(self):
+        """Ring, blink and flash the taskbar until the timer is reset.
+
+        Windows loops the wave file on its own, so the chime keeps going
+        whatever the window is doing - minimising it does not silence it.
+        """
+        if self.alarming:
+            return
+        self.alarming = True
+        if not self._alarm_sound(True):     # no winsound: the terminal bell
+            self._bell()
+        try:                                # come back into view, but do not
+            self.root.deiconify()           # steal the keyboard focus
+            self.root.lift()
+        except tk.TclError:
+            pass
+        self._flash_at = 0.0
+
+    def _stop_alarm(self):
+        """Silence the alarm at once. Safe to call when nothing is ringing.
+
+        Nothing here waits on anything, so Reset cuts the sound in the same
+        click that handles it.
+        """
+        self.alarming = False
+        if self._bell_after is not None:
             try:
-                import winsound
-                for freq in (988, 1319, 988, 1319, 880):
-                    winsound.Beep(freq, 200)
-                    time.sleep(0.06)
-            except Exception:
+                self.root.after_cancel(self._bell_after)
+            except tk.TclError:
+                pass
+            self._bell_after = None
+        self._alarm_sound(False)
+        flash_taskbar(self.root, False)
+        try:
+            self.time_label.configure(fg=FG)
+        except tk.TclError:
+            pass
+
+    def _alarm_sound(self, on):
+        """Start or stop the looping chime; True if winsound handled it.
+
+        SND_ASYNC hands the loop to Windows and SND_PURGE cuts it off in a
+        single call, so stopping never has to wait for a note to finish.
+        """
+        try:
+            import winsound
+        except Exception:
+            return False
+        try:
+            if not on:
+                winsound.PlaySound(None, winsound.SND_PURGE)
+                return True
+            if self._wav_path is None:
+                path = os.path.join(tempfile.gettempdir(), "hourglass_alarm.wav")
                 try:
-                    self.root.bell()
-                except Exception:
-                    pass
-        threading.Thread(target=play, daemon=True).start()
+                    with open(path, "wb") as fh:
+                        fh.write(alarm_wav_bytes())
+                except OSError:
+                    # a second copy of the app may have it open and playing;
+                    # what is already on disk is the same chime
+                    if not os.path.exists(path):
+                        raise
+                self._wav_path = path
+            winsound.PlaySound(self._wav_path,
+                               winsound.SND_FILENAME | winsound.SND_ASYNC
+                               | winsound.SND_LOOP | winsound.SND_NODEFAULT)
+            return True
+        except Exception:
+            self._wav_path = None
+            return False
+
+    def _bell(self):
+        """Fallback ring for platforms without winsound, on the main thread so
+        that cancelling it is instant too."""
+        self._bell_after = None
+        if not self.alarming:
+            return
+        try:
+            self.root.bell()
+            self._bell_after = self.root.after(700, self._bell)
+        except tk.TclError:
+            pass
 
     # -- frame loop -------------------------------------------------------
     def _loop(self):
@@ -439,18 +569,22 @@ class HourglassTimer:
                 self.remaining = 0.0
                 self.running = False
                 self.finished = True
-                self.alarm_until = now + 6.0
-                self._ring()
+                self._start_alarm()
             if self.remaining <= 0.0:
                 self._sync_labels()
             else:
                 self._show_time()
 
-        if self.alarm_until > now:
-            self.time_label.configure(fg=SAND if int(now * 3) % 2 else FG)
-        elif self.alarm_until:
-            self.alarm_until = 0.0
-            self.time_label.configure(fg=FG)
+        if self.alarming:
+            on = int(now * 3) % 2
+            self.time_label.configure(fg=SAND if on else FG)
+            self.status.configure(fg=SAND if on else MUTED)
+            if now >= self._flash_at:
+                # Re-arm every couple of seconds: Windows stops the blink once
+                # the window reaches the foreground, and the user may well
+                # minimise it again without touching Reset.
+                self._flash_at = now + 2.0
+                flash_taskbar(self.root, True)
 
         # Nothing moves while the glass is paused, so stop drawing entirely
         # rather than burn a core for the length of a one-hour timer.
