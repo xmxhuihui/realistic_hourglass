@@ -7,16 +7,49 @@ turns over when you flip it.
 
 ![the timer running](docs/screenshot.png)
 
+## Setup
+
+The virtual environment is not in the repository, so create it once after
+cloning. On **Windows**:
+
+```
+git clone https://github.com/xmxhuihui/realistic_hourglass.git
+cd realistic_hourglass
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+If `python` is not on your PATH, use the launcher that ships with the
+python.org installer instead: `py -3 -m venv .venv`.
+
+On **macOS / Linux**:
+
+```
+git clone https://github.com/xmxhuihui/realistic_hourglass.git
+cd realistic_hourglass
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+```
+
+You do not need to *activate* the environment. Every command here — and
+`run.bat` — calls the interpreter by path, so there is no `activate` step and no
+PowerShell execution-policy detour.
+
+If you would rather not use a virtual environment at all, install the two
+packages into whatever Python is on your PATH with
+`python -m pip install numpy pillow`; `run.bat` falls back to that automatically.
+
 ## Running it
 
 Double-click **`run.bat`**, or:
 
 ```
-.venv\Scripts\pythonw.exe hourglass_timer.py
+.venv\Scripts\pythonw.exe hourglass_timer.py       # Windows
+.venv/bin/python hourglass_timer.py                # macOS / Linux
 ```
 
-`run.bat` uses the bundled `.venv` if it is present and otherwise falls back to
-the `pythonw` on your PATH.
+`run.bat` uses `.venv` if it is present and otherwise falls back to the
+`pythonw` on your PATH.
 
 ## Using it
 
@@ -42,10 +75,13 @@ plays. **Restart** (or a flip) starts it again.
   is used for the flip animation. Without it the app falls back to a built-in
   PNG encoder and runs at a lower frame rate.
 
-```
-python -m venv .venv
-.venv\Scripts\pip install -r requirements.txt
-```
+See [Setup](#setup) for the install commands.
+
+It is written for Windows but does run on macOS and Linux: the Windows-only
+calls are all guarded, so the DPI hint becomes a no-op and the completion chime
+falls back to the terminal bell. You lose `run.bat`, Segoe UI and Consolas give
+way to Tk's default fonts, and on Linux the scroll-to-change-duration shortcut is
+inert because X11 does not send Tk's `<MouseWheel>` event.
 
 ## How the hourglass is drawn
 
