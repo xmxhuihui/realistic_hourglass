@@ -124,6 +124,10 @@ class HourglassRenderer:
         self.W = int(width)
         self.H = int(height)
         self.rng = np.random.default_rng(seed)
+        # the sand lies level to begin with and hollows out once it is running
+        self.settle = 0.0
+        self.dish = 0.0
+        self._last_frac = 1.0
         self._layout()
         self._grids()
         self._bake()
@@ -152,6 +156,7 @@ class HourglassRenderer:
         self.post_x = self.R + W * 0.036
         self.post_w = W * 0.019
         self.repose = 0.62             # tan(angle of repose) of the poured cone
+        self.settle_seconds = 30.0     # how long the surface takes to hollow out
         self.inner_top = self.glass_top + self.wall + 1.0
         self.inner_bot = self.glass_bot - self.wall - 1.0
         # extent of the whole piece, used to keep a flip inside the canvas
@@ -377,7 +382,7 @@ class HourglassRenderer:
         ta = np.empty_like(tl)
         top_half = ys <= self.ymid
         for i, L in enumerate(tl):
-            surf = self._top_surface(ys, xs, float(L))
+            surf = self._top_surface(ys, xs, float(L), dish=1.0)
             ta[i] = np.count_nonzero(cavity & top_half & (ys >= surf)) * cell
         self.top_levels, self.top_areas = tl, ta
         self.sand_area = float(ta[0])
@@ -390,14 +395,24 @@ class HourglassRenderer:
             ba[i] = np.count_nonzero(cavity & bot_half & (ys >= surf)) * cell
         self.bot_levels, self.bot_areas = bl, ba
 
-    def _top_surface(self, ys, xs, L):
-        """Surface of the sand still in the upper bulb: a shallow crater that
-        funnels towards the neck."""
+    def _top_surface(self, ys, xs, L, dish=None):
+        """Surface of the sand still in the upper bulb.
+
+        Level to start with, and hollowing out as the glass runs: ``dish`` runs
+        from 0 (poured flat) to 1 (settled). The hollow spans the whole width of
+        the glass and is a plain cosine, so it has no corner at the middle or at
+        the wall, and it is deliberately shallow - sand drawn off through a
+        narrow neck barely dips, and a deep bowl reads as scooped out.
+
+        The cosine is balanced about ``L``: the middle sinks by half the depth
+        and the edges rise by the same, so hollowing takes no sand away. That
+        keeps the level tables below valid whatever the surface is doing.
+        """
+        d = self.dish if dish is None else dish
         w = float(self.inner_width(np.array(L, F)))
-        rad = min(w, self.R * 0.34)
-        depth = min(0.45 * rad, 15.0)
-        t = np.clip(xs / max(rad, 1.0), 0, 1)
-        return L + depth * (1.0 - t * t)
+        depth = min(0.08 * w, self.W * 0.020) * d
+        t = np.clip(xs / max(w, 1.0), 0.0, 1.0)
+        return L + 0.5 * depth * np.cos(math.pi * t)
 
     def _top_level(self, frac):
         target = frac * self.sand_area
@@ -418,6 +433,15 @@ class HourglassRenderer:
         self.bot_y = (self._bot_level(1.0 - top_frac) if top_frac < 1.0 - 1e-4
                       else self.inner_bot)
         self.flowing = bool(flowing) and top_frac > 1e-4
+        # The surface lies flat until the glass is started, then hollows out
+        # over the first half minute of running. Anything that fills the upper
+        # bulb again - Reset, a new duration, a flip - starts it off level.
+        if top_frac > self._last_frac + 1e-3:
+            self.settle = 0.0
+        self._last_frac = top_frac
+        if self.flowing:
+            self.settle = min(self.settle + dt, self.settle_seconds)
+        self.dish = float(smoothstep(0.0, self.settle_seconds, self.settle))
         impact = min(self.bot_y, self.inner_bot)
         rng = self.rng
 
