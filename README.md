@@ -71,10 +71,9 @@ the project folder.
 | --- | --- |
 | **Start / Pause** | Runs or holds the countdown (`space`) |
 | **Reset** | Back to the full duration (`r`) |
-| **Flip** | Turns the glass over: what has run out becomes the time remaining (`f`) |
+| **Flip** | Turns the glass over: what has run out becomes the time remaining (`f`). Greyed out until the timer has started, since a full glass has nothing to turn over |
 | Preset chips | 1 to 60 minutes |
 | `custom` box | `90` (minutes), `5:30`, or `1:02:30`, then **set** or Enter |
-| Click the hourglass | Flips it |
 | Scroll over the hourglass | Adds or removes a minute while it is stopped |
 | **always on top** | Keeps the window above other apps |
 

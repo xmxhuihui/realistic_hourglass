@@ -40,6 +40,7 @@ PANEL_HI = "#222836"
 LINE = "#252b38"
 FG = "#e9e4d8"
 MUTED = "#8b93a4"
+DISABLED = "#5c6373"
 SAND = "#e3ad55"
 SAND_HI = "#f6cf8a"
 
@@ -535,6 +536,7 @@ class FlatButton(tk.Label):
     def __init__(self, master, text, command, primary=False, pad=(14, 7)):
         self.primary = primary
         self.command = command
+        self.enabled = True
         super().__init__(master, text=text, bd=0, highlightthickness=0,
                          padx=pad[0], pady=pad[1], cursor="hand2")
         self._paint(False)
@@ -543,19 +545,31 @@ class FlatButton(tk.Label):
         self.bind("<Button-1>", self._click)
 
     def _paint(self, hot):
-        if self.primary:
+        if not self.enabled:
+            self.configure(bg=PANEL, fg=DISABLED)
+        elif self.primary:
             self.configure(bg=SAND_HI if hot else SAND, fg="#241a08")
         else:
             self.configure(bg=PANEL_HI if hot else PANEL, fg=FG)
 
     def _click(self, _event):
-        self.command()
+        if self.enabled:
+            self.command()
 
     def set_text(self, text):
         self.configure(text=text)
 
     def set_primary(self, on):
         self.primary = bool(on)
+        self._paint(False)
+
+    def set_enabled(self, on):
+        """Grey the button out, or bring it back; a greyed one ignores clicks."""
+        on = bool(on)
+        if on == self.enabled:
+            return
+        self.enabled = on
+        self.configure(cursor="hand2" if on else "")
         self._paint(False)
 
 
@@ -617,11 +631,12 @@ class HourglassTimer:
         s = self.scale
         pad = int(16 * s)
 
+        # The glass itself is not a control: only the Flip button turns it over,
+        # so a click on the picture cannot throw the timing away by accident.
         self.canvas = tk.Canvas(self.root, width=cw, height=ch, bd=0,
-                                highlightthickness=0, bg=BG, cursor="hand2")
+                                highlightthickness=0, bg=BG)
         self.canvas.pack()
         self.blit = Blitter(self.canvas, cw, ch)
-        self.canvas.bind("<Button-1>", lambda e: self.flip())
         self.canvas.bind("<MouseWheel>", self._on_wheel)
 
         panel = tk.Frame(self.root, bg=BG, padx=pad, pady=int(6 * s))
@@ -743,8 +758,17 @@ class HourglassTimer:
         self._stop_alarm()
         self._sync_labels()
 
+    def can_flip(self):
+        """Whether there is anything to turn over yet.
+
+        A full glass has run for no time at all, so flipping it would leave
+        nothing to count and the alarm would go off a moment later. The button
+        is out of reach until the timer has been started.
+        """
+        return self.running or self.remaining < self.total
+
     def flip(self):
-        if self.flip_start is not None:
+        if self.flip_start is not None or not self.can_flip():
             return
         self.flip_start = time.perf_counter()
         self.flip_from = self.remaining
@@ -828,6 +852,7 @@ class HourglassTimer:
         self.status.configure(text=text, fg=colour)
         self.start_btn.set_text("Restart" if self.finished else
                                 ("Pause" if self.running else "Start"))
+        self.flip_btn.set_enabled(self.can_flip())
         for secs, chip in self.chips.items():
             chip.set_primary(abs(secs - self.total) < 0.5)
 
