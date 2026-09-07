@@ -94,10 +94,20 @@ bring the window back, or right-click it for **Show** and **Exit** — **Exit** 
 what actually ends the app. A timer that runs out while the window is hidden
 raises it again by itself, alarm and all.
 
+Only one copy runs at a time. Launching the app again — a double-click on the
+desktop shortcut while it is already up — does not start a second timer: the
+copy already running is brought to the front instead, out of the tray if that is
+where it was, and the new one exits without ever showing a window. The claim is a
+named mutex held by the running process, so it is released whenever that process
+ends, crash or kill included; there is no lock file to go stale.
+
 There is no extra package behind this: a hidden window collects what the shell
 sends and the timer's own frame loop reads it, so nothing runs on a second
-thread. Elsewhere than Windows there is no notification area to hide in, and the
-X button closes the app as usual.
+thread. That window is also how a second launch finds the copy already running,
+so in the unlikely event the tray icon cannot be registered at all, a second
+launch still refuses to start a rival but cannot raise the first window either.
+Elsewhere than Windows there is no notification area to hide in, and the X button
+closes the app as usual.
 
 ## Requirements
 

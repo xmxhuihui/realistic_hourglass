@@ -44,7 +44,7 @@ SAND = "#e3ad55"
 SAND_HI = "#f6cf8a"
 
 PRESETS = [("1", 60), ("3", 180), ("5", 300), ("10", 600),
-           ("15", 900), ("25", 1500), ("45", 2700), ("60", 3600)]
+           ("15", 900), ("30", 1800), ("45", 2700), ("60", 3600)]
 
 ICON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hourglass.ico")
 
@@ -187,6 +187,9 @@ def show_window(root):
 WM_TRAY = 0x0400 + 20                   # WM_APP + 20: our own tray callback
 TRAY_SHOW, TRAY_EXIT = 1, 2             # the two menu commands
 TRAY_MENU = 3                           # internal: put the menu up
+TRAY_CLASS = "HourglassTimerTray_"      # plus the process id: one per copy
+# the name a running copy holds so a second launch can tell it is there
+MUTEX_NAME = r"Local\HourglassTimer.SingleInstance"
 _tray_serial = 0
 
 
@@ -276,7 +279,7 @@ class TrayIcon:
         # the callback has to outlive the window, so it is kept on the instance
         self._proc = WNDPROC(self._wndproc)
         _tray_serial += 1
-        self._class = "HourglassTimerTray_%d_%d" % (os.getpid(), _tray_serial)
+        self._class = TRAY_CLASS + "%d_%d" % (os.getpid(), _tray_serial)
         hinst = kernel32.GetModuleHandleW(None)
         wc = WNDCLASS()
         wc.lpfnWndProc = self._proc
@@ -403,6 +406,92 @@ def make_tray(title, icon_path, on_show, on_exit):
         return TrayIcon(title, icon_path, on_show, on_exit)
     except Exception:
         return None
+
+
+_instance_lock = None                   # holding the handle is what holds the claim
+
+
+def claim_single_instance():
+    """Take the name that marks this app as running; False if it is taken.
+
+    Windows keeps a named mutex alive for exactly as long as some process holds
+    a handle to it, so the claim is dropped when we exit, however we exit. The
+    name sits in the session namespace, so another signed-in user still gets a
+    copy of their own. Where the call cannot be made at all the answer is yes:
+    refusing to start would be far worse than starting twice.
+    """
+    global _instance_lock
+    try:
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.restype = wintypes.HANDLE
+        kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL,
+                                          wintypes.LPCWSTR]
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = kernel32.CreateMutexW(None, False, MUTEX_NAME)
+        if not handle:
+            return True
+        if ctypes.get_last_error() == 183:          # ERROR_ALREADY_EXISTS
+            kernel32.CloseHandle(handle)
+            return False
+        _instance_lock = handle         # Windows drops it when this process ends
+        return True
+    except Exception:
+        return True
+
+
+def running_instance():
+    """The hidden tray window of a copy already running, or None.
+
+    Every copy owns one, and its class name carries the process id, which is
+    what tells somebody else's window apart from our own.
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+    except Exception:
+        return None
+
+    mine = os.getpid()
+    found = []
+
+    def visit(hwnd, _lparam):
+        name = ctypes.create_unicode_buffer(64)
+        user32.GetClassNameW(hwnd, name, 64)
+        if name.value.startswith(TRAY_CLASS):
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value != mine:
+                found.append(hwnd)
+                return False            # one is all we are after
+        return True
+
+    try:
+        proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        user32.EnumWindows(proc(visit), 0)
+    except Exception:
+        return None
+    return found[0] if found else None
+
+
+def wake_running_instance():
+    """Put the copy that is already running in front, if it can be found."""
+    hwnd = running_instance()
+    if not hwnd:
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT,
+                                        wintypes.WPARAM, wintypes.LPARAM]
+        # the very message the shell sends when its icon is clicked, so the
+        # other copy comes back through the path it already uses
+        return bool(user32.PostMessageW(hwnd, WM_TRAY, 1, 0x0202))
+    except Exception:
+        return False
 
 
 def png_bytes(arr):
@@ -906,6 +995,11 @@ class HourglassTimer:
 
 
 def main():
+    # One copy at a time: a second launch hands the running one the foreground,
+    # the way a click on its tray icon would, and stops there.
+    if not claim_single_instance():
+        wake_running_instance()
+        return 0
     app = HourglassTimer()
     app.run()
     return 0
